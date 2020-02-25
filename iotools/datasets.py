@@ -7,13 +7,13 @@ import numpy as np
 from torch.utils.data import Dataset
 
 class SparseImage(Dataset):
-    
-    def __init__(self, data_files, pdg_list=[]):
+
+    def __init__(self, data_files, pdg_list=[], crop_size=None):
         """
         Args: data_files ... a list of data files to read
               read_keys ......... a list of string values = data product keys in h5 file to be read-in (besides 'data')
         """
-        
+
         # Validate file paths
         self._files = [f if f.startswith('/') else os.path.join(os.getcwd(),f) for f in data_files]
         for f in self._files:
@@ -36,14 +36,27 @@ class SparseImage(Dataset):
             if self._shape is None:
                 self._shape = tuple(f['shape'])
             else:
-                assert self._shape == tuple(f['shape']) 
+                assert self._shape == tuple(f['shape'])
             self._event_to_file_index += [file_index] * data_size
             self._event_to_entry_index += range(data_size)
             f.close()
-            
+
         self._pdg_list = [int(v) for v in pdg_list]
 
-        
+        self._crop = False
+        self._csv_handles = [None] * len(self._files)
+        if crop_size is not None:
+            assert isinstance(crop_size, int) and crop_size > 0 and crop_size <= self._shape[-1]
+            self._crop = True
+            self._crop_size = crop_size
+            self._shape = (crop_size, crop_size, crop_size)
+            for file_index, f in enumerate(self._files):
+                fcsv = os.path.splitext(f)[0] + ".csv"
+                if not os.path.isfile(fcsv):
+                    sys.stderr.write('Error: CSV file not found %s' % fcsv)
+                    continue
+                self._csv_handles[file_index] = np.genfromtxt(fcsv, names=True, delimiter=",")
+
     def __len__(self):
         return len(self._event_to_file_index)
 
@@ -57,53 +70,59 @@ class SparseImage(Dataset):
         data = fh['data'][entry_index]
         mask = np.where(data[:,0]>=0.)
         data = data[mask]
-        
+
+        if self._crop and self._csv_handles[file_index] is not None:
+            csv_np = self._csv_handles[file_index][entry_index]
+            v0 = np.stack([csv_np['x0'], csv_np['y0'], csv_np['z0']])
+            v1 = np.stack([csv_np['x1'], csv_np['y1'], csv_np['z1']])
+            diff = - (v0 + v1) / 2. + self._shape[0]/2.
+            data[:, :3] = data[:, :3] + diff
+
         # fill the sparse label (if exists)
         label = None
         if 'semantic' in fh:
             label = fh['semantic'][entry_index][mask]
-                
+
         if 'pdg' in fh:
             label = int(fh['pdg'][entry_index])
             if not label in self._pdg_list:
                 sys.stderr.write('Error: PDG %d not expected (list: %s)\n' % (label,self.pdg_list))
                 raise ValueError
             label = self._pdg_list.index(label)
-        
+
         return (data,label,idx)
-        
+
 class DenseImage2D(SparseImage):
-    
-    SEMANTIC_BACKGROUND_CLASS=2 # the background class for dense semantic segmentation 
-    
-    def __init__(self, data_files, reduce_axis=2, pdg_list=[]):
+
+    SEMANTIC_BACKGROUND_CLASS=2 # the background class for dense semantic segmentation
+
+    def __init__(self, data_files, reduce_axis=2, pdg_list=[], crop_size=None):
         """
         Args: data_files ... a list of data files to read
         """
-        super().__init__(data_files=data_files,pdg_list=pdg_list)
+        super().__init__(data_files=data_files,pdg_list=pdg_list, crop_size=crop_size)
 
         self._data_buffer  = None
         self._label_buffer = None
         self._reduce_axis  = int(reduce_axis)
         assert self._reduce_axis in [0,1,2]
-        
+
     def __getitem__(self,idx):
-        
+
         data,label,_ = super().__getitem__(idx)
-        
+
         if self._data_buffer is None:
             self._data_buffer  = np.zeros(shape=self._shape,dtype=np.float32)
             self._label_buffer = np.zeros(shape=self._shape,dtype=np.float32)
-    
+
         mask = data[:,:3].astype(np.int32)
         self._data_buffer [:] = 0.
         self._data_buffer[mask[:,0],mask[:,1],mask[:,2]] = data[:,3]
         data  = np.sum(self._data_buffer,axis=self._reduce_axis)
-        
+
         if isinstance(label,np.ndarray):
             self._label_buffer[:] = SEMANTIC_BACKGROUND_CLASS
             self._label_buffer[mask[:,0],mask[:,1],mask[:,2]] = label
             label = np.min(self._data_buffer,axis=self._reduce_axis)
-            
-        return (data,label,idx)
 
+        return (data,label,idx)
