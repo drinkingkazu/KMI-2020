@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 
 class SparseImage(Dataset):
 
-    def __init__(self, data_files, pdg_list=[], crop_size=None):
+    def __init__(self, data_files, pdg_list=[], crop_size=None, angles3d=False):
         """
         Args: data_files ... a list of data files to read
               read_keys ......... a list of string values = data product keys in h5 file to be read-in (besides 'data')
@@ -55,7 +55,8 @@ class SparseImage(Dataset):
                 if not os.path.isfile(fcsv):
                     sys.stderr.write('Error: CSV file not found %s' % fcsv)
                     continue
-                self._csv_handles[file_index] = np.genfromtxt(fcsv, names=True, delimiter=",")
+
+        self._angles3d = angles3d
 
     def __len__(self):
         return len(self._event_to_file_index)
@@ -65,18 +66,26 @@ class SparseImage(Dataset):
         entry_index = self._event_to_entry_index[idx]
         if self._file_handles[file_index] is None:
             self._file_handles[file_index] = h5py.File(self._files[file_index],mode='r',swmr=True)
+        if self._csv_handles[file_index] is None:
+            fcsv = os.path.splitext(self._files[file_index])[0] + ".csv"
+            self._csv_handles[file_index] = np.genfromtxt(fcsv, names=True, delimiter=",")
         fh = self._file_handles[file_index]
 
         data = fh['data'][entry_index]
         mask = np.where(data[:,0]>=0.)
         data = data[mask]
 
-        if self._crop and self._csv_handles[file_index] is not None:
+        if self._crop:
             csv_np = self._csv_handles[file_index][entry_index]
             v0 = np.stack([csv_np['x0'], csv_np['y0'], csv_np['z0']])
             v1 = np.stack([csv_np['x1'], csv_np['y1'], csv_np['z1']])
             diff = - (v0 + v1) / 2. + self._shape[0]/2.
             data[:, :3] = data[:, :3] + diff
+
+            # Compute 3D angles
+            v = v1 - v0
+            theta = np.arctan2(v[2], np.hypot(v[0], v[1]))
+            phi = np.arctan2(v[1], v[0])
 
         # fill the sparse label (if exists)
         label = None
@@ -90,17 +99,29 @@ class SparseImage(Dataset):
                 raise ValueError
             label = self._pdg_list.index(label)
 
+        # Remove pixels that end up outside of crop region
+        if self._crop:
+            mask = ((data[:, :3] >= 0.) & (data[:, :3] < self._crop_size)).all(axis=1)
+            data = data[mask]
+            if isinstance(label, np.ndarray):
+                label = label[mask]
+        if self._angles3d:
+            if isinstance(label, np.ndarray):
+                pass # TODO?
+            else:
+                label = [label, theta, phi]
+
         return (data,label,idx)
 
 class DenseImage2D(SparseImage):
 
     SEMANTIC_BACKGROUND_CLASS=2 # the background class for dense semantic segmentation
 
-    def __init__(self, data_files, reduce_axis=2, pdg_list=[], crop_size=None):
+    def __init__(self, data_files, reduce_axis=2, pdg_list=[], crop_size=None, angles3d=False):
         """
         Args: data_files ... a list of data files to read
         """
-        super().__init__(data_files=data_files,pdg_list=pdg_list, crop_size=crop_size)
+        super().__init__(data_files=data_files,pdg_list=pdg_list, crop_size=crop_size, angles3d=angles3d)
 
         self._data_buffer  = None
         self._label_buffer = None
@@ -121,7 +142,7 @@ class DenseImage2D(SparseImage):
         data  = np.sum(self._data_buffer,axis=self._reduce_axis)
 
         if isinstance(label,np.ndarray):
-            self._label_buffer[:] = SEMANTIC_BACKGROUND_CLASS
+            self._label_buffer[:] = DenseImage2D.SEMANTIC_BACKGROUND_CLASS
             self._label_buffer[mask[:,0],mask[:,1],mask[:,2]] = label
             label = np.min(self._data_buffer,axis=self._reduce_axis)
 
