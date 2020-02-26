@@ -26,6 +26,7 @@ class SparseImage(Dataset):
         self._event_to_file_index  = []
         self._event_to_entry_index = []
         self._shape = None
+        search_pdg = not len(pdg_list) 
         for file_index, file_name in enumerate(self._files):
             f = h5py.File(file_name,mode='r',swmr=True)
             # data size should be common across keys (0th dim)
@@ -39,7 +40,14 @@ class SparseImage(Dataset):
                 assert self._shape == tuple(f['shape']) 
             self._event_to_file_index += [file_index] * data_size
             self._event_to_entry_index += range(data_size)
+            # if search_pdg is set and pdg exists in data, append unique pdg list
+            if 'pdg' in f and search_pdg:
+                pdg_list.append(np.unique(f['pdg']))
+            
             f.close()
+        # if search_pdg is set then combine an array (per file) of pdg
+        if search_pdg and len(pdg_list):
+            pdg_list = np.unique(np.concatenate(pdg_list))
             
         self._pdg_list = [int(v) for v in pdg_list]
 
@@ -59,18 +67,18 @@ class SparseImage(Dataset):
         data = data[mask]
         
         # fill the sparse label (if exists)
-        label = None
+        label,pdg = None,None
         if 'semantic' in fh:
             label = fh['semantic'][entry_index][mask]
                 
         if 'pdg' in fh:
-            label = int(fh['pdg'][entry_index])
-            if not label in self._pdg_list:
-                sys.stderr.write('Error: PDG %d not expected (list: %s)\n' % (label,self.pdg_list))
+            pdg = int(fh['pdg'][entry_index])
+            if not pdg in self._pdg_list:
+                sys.stderr.write('Error: PDG %d not expected (list: %s)\n' % (pdg,self.pdg_list))
                 raise ValueError
-            label = self._pdg_list.index(label)
+            label = self._pdg_list.index(pdg)
         
-        return (data,label,idx)
+        return dict(data=data,label=label,pdg=pdg,index=idx)
         
 class DenseImage2D(SparseImage):
     
@@ -89,7 +97,8 @@ class DenseImage2D(SparseImage):
         
     def __getitem__(self,idx):
         
-        data,label,_ = super().__getitem__(idx)
+        res = super().__getitem__(idx)
+        data,label,pdg = res['data'],res['label'],res['pdg']
         
         if self._data_buffer is None:
             self._data_buffer  = np.zeros(shape=self._shape,dtype=np.float32)
@@ -105,5 +114,5 @@ class DenseImage2D(SparseImage):
             self._label_buffer[mask[:,0],mask[:,1],mask[:,2]] = label
             label = np.min(self._data_buffer,axis=self._reduce_axis)
             
-        return (data,label,idx)
+        return dict(data=data,label=label,pdg=pdg,index=idx)
 
