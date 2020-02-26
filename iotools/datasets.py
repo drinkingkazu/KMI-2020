@@ -75,18 +75,6 @@ class SparseImage(Dataset):
         mask = np.where(data[:,0]>=0.)
         data = data[mask]
 
-        if self._crop:
-            csv_np = self._csv_handles[file_index][entry_index]
-            v0 = np.stack([csv_np['x0'], csv_np['y0'], csv_np['z0']])
-            v1 = np.stack([csv_np['x1'], csv_np['y1'], csv_np['z1']])
-            diff = - (v0 + v1) / 2. + self._shape[0]/2.
-            data[:, :3] = data[:, :3] + diff
-
-            # Compute 3D angles
-            v = v1 - v0
-            theta = np.arctan2(v[2], np.hypot(v[0], v[1]))
-            phi = np.arctan2(v[1], v[0])
-
         # fill the sparse label (if exists)
         label = None
         if 'semantic' in fh:
@@ -99,17 +87,32 @@ class SparseImage(Dataset):
                 raise ValueError
             label = self._pdg_list.index(label)
 
-        # Remove pixels that end up outside of crop region
         if self._crop:
+            csv_np = self._csv_handles[file_index][entry_index]
+            v0 = np.stack([csv_np['x0'], csv_np['y0'], csv_np['z0']])
+            v1 = np.stack([csv_np['x1'], csv_np['y1'], csv_np['z1']])
+            diff = - (v0 + v1) / 2. + self._shape[0]/2.
+            data[:, :3] = data[:, :3] + diff
+            v0 = v0 + diff
+            v1 = v1 + diff
+
+            # Compute 3D angles
+            # v = v1 - v0
+            # theta = np.arctan2(v[2], np.hypot(v[0], v[1]))
+            # phi = np.arctan2(v[1], v[0])
+
+            # Remove pixels that end up outside of crop region
             mask = ((data[:, :3] >= 0.) & (data[:, :3] < self._crop_size)).all(axis=1)
             data = data[mask]
             if isinstance(label, np.ndarray):
                 label = label[mask]
+
         if self._angles3d:
             if isinstance(label, np.ndarray):
                 pass # TODO?
             else:
-                label = [label, theta, phi]
+                #label = [label, v[0], v[1], v[2], theta, phi]
+                label = [label, v0[0], v0[1], v0[2], v1[0], v1[1], v1[2]]
 
         return (data,label,idx)
 
@@ -117,16 +120,19 @@ class DenseImage2D(SparseImage):
 
     SEMANTIC_BACKGROUND_CLASS=2 # the background class for dense semantic segmentation
 
-    def __init__(self, data_files, reduce_axis=2, pdg_list=[], crop_size=None, angles3d=False):
+    def __init__(self, data_files, reduce_axis=2, pdg_list=[], crop_size=None, angles3d=False, angles2d=False):
         """
         Args: data_files ... a list of data files to read
         """
+        if angles2d:
+            angles3d = True
         super().__init__(data_files=data_files,pdg_list=pdg_list, crop_size=crop_size, angles3d=angles3d)
 
         self._data_buffer  = None
         self._label_buffer = None
         self._reduce_axis  = int(reduce_axis)
         assert self._reduce_axis in [0,1,2]
+        self._angles2d = angles2d
 
     def __getitem__(self,idx):
 
@@ -141,9 +147,30 @@ class DenseImage2D(SparseImage):
         self._data_buffer[mask[:,0],mask[:,1],mask[:,2]] = data[:,3]
         data  = np.sum(self._data_buffer,axis=self._reduce_axis)
 
-        if isinstance(label,np.ndarray):
+        if isinstance(label, np.ndarray):
             self._label_buffer[:] = DenseImage2D.SEMANTIC_BACKGROUND_CLASS
             self._label_buffer[mask[:,0],mask[:,1],mask[:,2]] = label
             label = np.min(self._data_buffer,axis=self._reduce_axis)
+
+        if self._angles2d:
+            if isinstance(label, np.ndarray):
+                pass # TODO ?
+            else:
+                x, y, z = label[4] - label[1], label[5] - label[2], label[6] - label[3]
+                # Compute 2D projection angle
+                if self._reduce_axis == 1: # xz plane
+                    temp = z
+                    z = y
+                    y = x
+                    x = temp
+                elif self._reduce_axis == 0: # yz plane
+                    temp = z
+                    z = x
+                    x = y
+                    y = temp
+                angle0 = np.arctan2(z, np.hypot(x, y))
+                angle1 = np.arctan2(y, x)
+                # FIXME replace or append in labels?
+                label = [label[0], angle0, angle1] # angles are in radians
 
         return (data,label,idx)
