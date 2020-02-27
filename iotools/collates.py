@@ -20,7 +20,7 @@ def DenseCollate(batch):
     if 'phi' in batch[0]:
         res['phi'  ] = np.array([sample['phi'  ] for sample in batch])
         res['theta'] = np.array([sample['theta'] for sample in batch])
-        
+    return res
 
 def SparseCollate(batch):
     res = dict(data  = [sample['data' ] for sample in batch],
